@@ -66,14 +66,21 @@ class PriceUpdate(BaseModel):
 
 # ─── App + state ───────────────────────────────────────────────────────
 app = FastAPI(title="Bookstore API", version="1.0.0")
-books: Dict[int, Book] = {
-    1: Book(name="The Pragmatic Programmer", author="Andy Hunt",
-            isbn="978-0135957059", price=42.99),
-    2: Book(name="Designing Data-Intensive Applications", author="Martin Kleppmann",
-            isbn="978-1449373320", price=49.95),
-    3: Book(name="Clean Code", author="Robert C. Martin",
-            isbn="978-0132350884", price=37.50),
-}
+
+
+def _seed() -> Dict[int, Book]:
+    """Return a fresh seed dict — used at startup AND by tests to reset state."""
+    return {
+        1: Book(name="The Pragmatic Programmer", author="Andy Hunt",
+                isbn="978-0135957059", price=42.99),
+        2: Book(name="Designing Data-Intensive Applications", author="Martin Kleppmann",
+                isbn="978-1449373320", price=49.95),
+        3: Book(name="Clean Code", author="Robert C. Martin",
+                isbn="978-0132350884", price=37.50),
+    }
+
+
+books: Dict[int, Book] = _seed()
 
 
 # ─── Metrics middleware ────────────────────────────────────────────────

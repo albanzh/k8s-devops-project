@@ -8,28 +8,21 @@ Run from k8s-devops-project/kubernetes/bookstore-api/app/:
 The Jenkins pipeline runs these in the `python` container before building the image.
 """
 
-import importlib
 import pytest
 from fastapi.testclient import TestClient
-from prometheus_client import REGISTRY
-
-
-def _reset_prom_registry():
-    """Unregister every collector so reload(main) can re-register without
-    'Duplicated timeseries' errors."""
-    for collector in list(REGISTRY._collector_to_names.keys()):
-        try:
-            REGISTRY.unregister(collector)
-        except KeyError:
-            pass
 
 
 @pytest.fixture
 def client():
-    """Fresh app + seed data per test (avoids state bleed between tests)."""
-    _reset_prom_registry()
+    """Fresh seed data per test (avoids state bleed between tests).
+
+    We reset the books dict in-place rather than reloading main.py — reload
+    re-runs the module body, which re-registers Prometheus metrics and crashes
+    with 'Duplicated timeseries' errors.
+    """
     import main
-    importlib.reload(main)   # resets the in-memory `books` dict
+    main.books.clear()
+    main.books.update(main._seed())
     return TestClient(main.app)
 
 
