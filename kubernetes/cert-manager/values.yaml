@@ -1,0 +1,44 @@
+# cert-manager Helm chart values
+# Chart: jetstack/cert-manager (https://charts.jetstack.io)
+
+# Install CRDs in the same Helm release (one-step install)
+installCRDs: true
+
+# Disable the post-install Job that calls the webhook to "verify install".
+# It often deadlocks during cluster bring-up because the webhook isn't reachable yet.
+# We do the same verification manually in the README's Verify section.
+startupapicheck:
+  enabled: false
+
+# Resource limits — keep cert-manager light (it just watches CRDs)
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+webhook:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+cainjector:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Useful labels Prometheus can scrape later
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: false   # flip to true after kube-prometheus-stack is installed (Phase 7)

@@ -1,0 +1,63 @@
+# Filebeat — DaemonSet that ships pod logs to Elasticsearch
+# Chart: elastic/filebeat
+
+daemonset:
+  enabled: true
+
+  # Standard log path on each node (kubelet writes here)
+  extraVolumeMounts:
+    - name: varlogcontainers
+      mountPath: /var/log/containers
+      readOnly: true
+    - name: varlogpods
+      mountPath: /var/log/pods
+      readOnly: true
+    - name: varlibdockercontainers
+      mountPath: /var/lib/docker/containers
+      readOnly: true
+  extraVolumes:
+    - name: varlogcontainers
+      hostPath: { path: /var/log/containers }
+    - name: varlogpods
+      hostPath: { path: /var/log/pods }
+    - name: varlibdockercontainers
+      hostPath: { path: /var/lib/docker/containers }
+
+  filebeatConfig:
+    filebeat.yml: |
+      # autodiscover: react to pod start/stop and parse logs accordingly
+      filebeat.autodiscover:
+        providers:
+          - type: kubernetes
+            node: ${NODE_NAME}
+            hints.enabled: true
+            hints.default_config:
+              type: container
+              paths:
+                - /var/log/containers/*${data.kubernetes.container.id}.log
+
+      processors:
+        - add_kubernetes_metadata:
+            host: ${NODE_NAME}
+            matchers:
+              - logs_path:
+                  logs_path: "/var/log/containers/"
+
+      output.elasticsearch:
+        hosts: ['http://elasticsearch-master:9200']
+        # Default index pattern: filebeat-<version>-<date>
+        # Search in Kibana with: filebeat-*
+
+  resources:
+    requests: {cpu: 100m, memory: 100Mi}
+    limits:   {cpu: 500m, memory: 200Mi}
+
+  # Run on every node (incl. master) so we capture controller logs too
+  tolerations:
+    - operator: Exists
+
+# Required for hints.enabled and add_kubernetes_metadata
+clusterRoleRules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "nodes"]
+    verbs: ["get", "watch", "list"]

@@ -1,0 +1,117 @@
+# Defaults — Jenkins overrides image.repository, image.tag, ingress.host, etc.
+
+replicaCount: 2
+
+image:
+  repository: docker.io/aster2022/bookstore
+  tag: "1.0.0"            # CI overrides with build number
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+# Ingress with cert-manager + TLS via Let's Encrypt
+ingress:
+  enabled: true
+  className: nginx
+  host: bookstore.example.com   # CI overrides via --set
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging   # flip to letsencrypt-prod when ready
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    enabled: true
+    secretName: bookstore-tls
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Pod-level security
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop: ["ALL"]
+
+# HPA — autoscale 2-10 replicas
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# PDB — at least 1 replica during voluntary disruption
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Probes hit /health (defined in main.py)
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Prometheus picks this up automatically (Phase 8)
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+
+# Filebeat auto-discovers pods with these annotations (Phase 8)
+podAnnotations:
+  co.elastic.logs/enabled: "true"
+  co.elastic.logs/json.keys_under_root: "true"
+  co.elastic.logs/json.add_error_key: "true"
+
+# Schedule on workers, spread across nodes
+nodeSelector: {}
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: bookstore

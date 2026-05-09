@@ -1,0 +1,104 @@
+# kube-prometheus-stack values
+# Chart: prometheus-community/kube-prometheus-stack
+#
+# Bundles: Prometheus operator + Prometheus + Grafana + Alertmanager
+#          + node-exporter (DaemonSet) + kube-state-metrics
+
+# ─── Grafana ───────────────────────────────────────────────────────
+grafana:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - grafana.aster123.duckdns.org   # ← edit before install
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-staging
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.aster123.duckdns.org
+
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  defaultDashboardsEnabled: true
+
+  # Auto-load any ConfigMap with label `grafana_dashboard: "1"`
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits:   {cpu: 500m, memory: 512Mi}
+
+# ─── Prometheus ────────────────────────────────────────────────────
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - prometheus.aster123.duckdns.org
+    paths:
+      - /
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-staging
+      # basic-auth secret created separately — see README.md
+      nginx.ingress.kubernetes.io/auth-type: basic
+      nginx.ingress.kubernetes.io/auth-secret: monitoring/monitoring-basic-auth
+      nginx.ingress.kubernetes.io/auth-realm: "Prometheus Restricted"
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - prometheus.aster123.duckdns.org
+
+  prometheusSpec:
+    retention: 15d
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits:   {cpu: 1, memory: 2Gi}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # Pick up ServiceMonitors from any namespace WITHOUT label-selector restrictions.
+    # Without these, the chart only finds ServiceMonitors with label `release: prometheus`.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+# ─── Alertmanager ──────────────────────────────────────────────────
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits:   {cpu: 200m, memory: 256Mi}
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: 'null'
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: 'null'
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: 'null'
+      # TODO add a real receiver:
+      # - name: 'slack'
+      #   slack_configs:
+      #     - api_url: 'https://hooks.slack.com/services/...'
+      #       channel: '#alerts'

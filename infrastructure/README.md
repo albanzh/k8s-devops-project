@@ -1,0 +1,221 @@
+# Phase 1 — Infrastructure (Terraform + Ansible)
+
+This folder owns **Azure VMs + cluster bootstrap**. After `terraform apply`, the cluster is fully running with K8s 1.28.2 + Calico CNI + base NGINX Ingress.
+
+For **everything that comes after** (Jenkins, the bookstore app, observability), see [../kubernetes/](../kubernetes/).
+
+---
+
+## Current state (replace IPs after re-applying)
+
+| | |
+|---|---|
+| Master | `51.136.90.206` |
+| Worker-1 | `20.101.64.184` |
+| Worker-2 | `52.157.100.141` |
+| SSH key | `~/ssh_key.pem` |
+| Cluster | K8s 1.28.2, Calico v3.26 (VXLAN+1380), NGINX Ingress v1.8.1 |
+
+Get fresh values anytime:
+```bash
+cd /mnt/c/Users/user/Desktop/kube/k8s-devops-project/infrastructure
+terraform output
+```
+
+---
+
+## What this folder does
+
+```
+infrastructure/
+├── main.tf                  ← VMs, NSG, Public IPs, NICs, Ansible trigger
+├── providers.tf             ← terraform 1.0+, azurerm 3.x, tls, local, null
+├── variables.tf             ← subscription_id, username, letsencrypt_email, admin_source_cidr
+├── outputs.tf               ← master_public_ip, ssh_command_master, summary
+├── terraform.tfvars         ← YOUR values (gitignored)
+├── command.md               ← cluster diagnostic commands (run these anytime)
+└── ansible/
+    ├── site.yml             ← 4 plays: common → master → worker → ingress
+    ├── inventory.tpl        ← rendered to inventory.ini at apply time
+    └── roles/               ← common, containerd, kubernetes, k8s_master,
+                                k8s_worker, nginx_ingress
+```
+
+---
+
+## Deploy / re-deploy
+
+```bash
+cd /mnt/c/Users/user/Desktop/kube/k8s-devops-project/infrastructure
+terraform init
+terraform plan -out tf.plan
+terraform apply tf.plan
+```
+
+Takes 8–12 min. Outputs print the master IP + ready-to-paste SSH command.
+
+## Destroy
+
+```bash
+terraform destroy -auto-approve
+```
+
+Removes all VMs/NICs/Public IPs (~3 min). The pre-existing RG/VNet/Subnet stay.
+
+## Verify cluster health
+
+```bash
+ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get nodes && kubectl get pods -A | grep -vE "Running|Completed"'
+```
+
+For a deeper sweep, see [command.md](command.md).
+
+---
+
+# Next steps — proceed in this order
+
+Each phase has its own README with exact install commands, verification steps, and skepticism. Don't skip ahead until the previous one verifies.
+
+| # | Phase | Where the instructions live | What it does |
+|---|-------|----------------------------|--------------|
+| 1 | **Infrastructure** (this folder) | you're here | Azure infra + K8s + base ingress |
+| 2 | **DNS (DuckDNS)** | manual — see below | Free hostname → master IP |
+| 3 | **Ingress (Helm)** | [../kubernetes/ingress-nginx/](../kubernetes/ingress-nginx/) | Replace ansible-installed manifest with Helm-managed DaemonSet (3 nodes serve ingress) |
+| 4 | **TLS (cert-manager)** | [../kubernetes/cert-manager/](../kubernetes/cert-manager/) | Auto-issue Let's Encrypt certs |
+| 5 | **Jenkins** | [../kubernetes/jenkins/](../kubernetes/jenkins/) | CI/CD with JCasC + ephemeral K8s agents |
+| 6 | **Bookstore API** | [../kubernetes/bookstore-api/](../kubernetes/bookstore-api/) | FastAPI app + Dockerfile + Helm chart |
+| 7 | **CI/CD pipeline** | [../kubernetes/bookstore-api/Jenkinsfile](../kubernetes/bookstore-api/Jenkinsfile) | Test → Kaniko build → Trivy scan → Helm deploy → Verify |
+| 8 | **Observability** | [../kubernetes/monitoring/](../kubernetes/monitoring/) | Prometheus + Grafana + ELK + bookstore dashboard |
+
+> ⚠️ Phase 3 first-time install requires deleting the ansible-installed manifest before `helm install` (Helm refuses to adopt resources without ownership labels). Both steps are in the [ingress-nginx README](../kubernetes/ingress-nginx/README.md) under "Migrating from the bare-metal manifest install".
+
+## Spec mapping
+
+The original 8-step spec maps to these 8 phases as follows:
+
+| Spec | Phase | What's done |
+|------|-------|-------------|
+| 1. Terraform 3 VMs | Phase 1 | ✅ this folder |
+| 2. Ansible kubeadm cluster | Phase 1 (via terraform's local-exec) | ✅ this folder's `ansible/` |
+| 3. NGINX Ingress + cert-manager + LE + DNS | Phases 2+3+4 | ✅ kubernetes/{ingress-nginx,cert-manager}/, DuckDNS manual |
+| 4. Jenkins via Helm + ephemeral agents | Phase 5 | ✅ kubernetes/jenkins/ — JCasC config + 2 pod templates |
+| 5. Python FastAPI bookstore (4 endpoints) | Phase 6 | ✅ kubernetes/bookstore-api/app/main.py |
+| 6. Containerize | Phase 6 | ✅ kubernetes/bookstore-api/app/Dockerfile |
+| 7. Jenkinsfile CI/CD pipeline | Phase 7 | ✅ kubernetes/bookstore-api/Jenkinsfile + helm/bookstore/ |
+| 8. Prometheus/Grafana + ELK | Phase 8 | ✅ kubernetes/monitoring/{prometheus,elasticsearch,kibana,filebeat}/ |
+
+---
+
+## Phase 2 — DNS (the only purely-manual step)
+
+DuckDNS gives you a free `*.duckdns.org` subdomain pointing wherever you want.
+
+1. https://www.duckdns.org → log in (GitHub/Google)
+2. Add a subdomain — pick something unique, e.g. `aster123` or `bookstore-demo`
+3. Set **current ip** to your master IP from `terraform output -raw master_public_ip` → click **update ip**
+
+Verify from WSL:
+```bash
+DOMAIN="aster123.duckdns.org"   # ← whatever you picked
+nslookup $DOMAIN              # should return your master IP
+curl -I http://$DOMAIN        # should return: HTTP/1.1 404 Not Found, Server: nginx
+```
+
+DuckDNS gives you the **wildcard** for free: `jenkins.aster123.duckdns.org`, `bookstore.aster123.duckdns.org`, `grafana.aster123.duckdns.org`, etc. all resolve to the same IP automatically. No extra config needed for sub-hosts.
+
+After step 3, you have a stable hostname. Proceed to Phase 3.
+
+---
+
+## Phases 3-8 — install order
+
+```bash
+# ─── Phase 3: ingress-nginx (Helm) ──────────────────────────────────
+cd ../kubernetes/ingress-nginx/
+# Follow README.md — includes the manifest cleanup step
+
+# ─── Phase 4: cert-manager + LE issuers ─────────────────────────────
+cd ../cert-manager/
+# Follow README.md — includes a smoke test (issue a real cert)
+
+# ─── Phase 5: Jenkins (depends on 3 + 4) ────────────────────────────
+cd ../jenkins/
+# 1. Edit values.yaml — set ingress hostName + tls.hosts to your DuckDNS subdomain
+# 2. Follow README.md — admin password printed at end of install
+# 3. In Jenkins UI, add `dockerhub-creds` credential (for Phase 7 build)
+
+# ─── Phases 6+7: Bookstore code + CI/CD pipeline ────────────────────
+cd ../bookstore-api/
+# Phase 6 — what's already in this folder:
+#   app/main.py + Dockerfile + tests   (Phases 5+6 of the spec: code + container)
+#   helm/bookstore/                    (Phase 7.1 of the spec: deploy via Helm)
+#   Jenkinsfile                        (Phase 7 of the spec: CI/CD pipeline)
+#
+# To run Phase 7 (CI/CD):
+#   1. Edit helm/bookstore/values.yaml line 9 — set image.repository to YOUR Docker Hub username
+#   2. Edit Jenkinsfile line 16 — same DEFAULT (or override at build time)
+#   3. git push the project to GitHub
+#   4. Jenkins UI → New Item → Pipeline → Pipeline script from SCM:
+#        Repo: <your-github-url>
+#        Script Path: kubernetes/bookstore-api/Jenkinsfile
+#   5. Build with Parameters:
+#        IMAGE_REPO     = docker.io/<your_user>/bookstore
+#        APP_HOST       = bookstore.aster123.duckdns.org
+#        NAMESPACE      = bookstore
+#        CLUSTER_ISSUER = letsencrypt-staging  (flip to prod after first success)
+#   6. Verify: curl -k https://bookstore.aster123.duckdns.org/books
+
+# ─── Phase 8: Observability (Prometheus/Grafana + ELK) ──────────────
+cd ../monitoring/
+# Install in this order (each ~5-10 min):
+cd prometheus/      # → READ + run README.md
+cd ../elasticsearch/  # → READ + run README.md
+cd ../kibana/         # → READ + run README.md
+cd ../filebeat/       # → READ + run README.md
+# After all 4 are up:
+#   • https://grafana.aster123.duckdns.org → Bookstore API dashboard
+#   • https://kibana.aster123.duckdns.org  → Discover → filter kubernetes.namespace:bookstore
+```
+
+Each subfolder has its own:
+- **values.yaml** — the source of truth, edit before installing
+- **README.md** — install / verify / upgrade / rollback / skepticism
+
+---
+
+## Common diagnostics (any phase)
+
+See [command.md](command.md) — full health-sweep SSH block + per-component drill-downs.
+
+Quick "is it alive?" one-liner:
+```bash
+ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get nodes && echo "---" && kubectl get pods -A | grep -vE "Running|Completed"'
+```
+
+If the second part returns just the header, **everything is healthy**.
+
+---
+
+## When IPs change (after destroy + apply)
+
+Replace `51.136.90.206`, `20.101.64.184`, `52.157.100.141` everywhere in this folder with new values:
+
+```bash
+# Get new IPs
+cd /mnt/c/Users/user/Desktop/kube/k8s-devops-project/infrastructure
+terraform output
+
+# Update DuckDNS in browser to point at the new master IP
+```
+
+Then update the IPs in the per-component READMEs the same way (4 files use them):
+- `infrastructure/README.md`
+- `kubernetes/ingress-nginx/README.md`
+- `kubernetes/cert-manager/README.md`
+- `kubernetes/jenkins/README.md`
+
+A `find /grep` + `sed -i` loop handles it in 1 command:
+```bash
+find /mnt/c/Users/user/Desktop/kube/k8s-devops-project -name "*.md" -exec \
+  sed -i 's/51.136.90.206/<NEW_MASTER_IP>/g' {} \;
+```

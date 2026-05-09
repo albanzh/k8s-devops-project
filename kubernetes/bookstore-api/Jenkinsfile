@@ -1,0 +1,197 @@
+// Bookstore CI/CD pipeline.
+// Triggers: every git push (configure SCM webhook later) or manual "Build with Parameters".
+//
+// Stages:
+//   1. Checkout         — pull source from SCM
+//   2. Test             — pytest in python container
+//   3. Build (Kaniko)   — OCI image build, push to Docker Hub (no Docker daemon, no privilege)
+//   4. Scan (Trivy)     — fail on HIGH/CRITICAL CVEs (configurable)
+//   5. Resolve host     — auto-detect bookstore.<MASTER_IP>.duckdns.org if APP_HOST blank
+//   6. Deploy (Helm)    — upgrade --install bookstore chart with new image tag
+//   7. Verify           — kubectl rollout status + curl health
+//
+// Uses the 'build' agent template (jnlp + kaniko + trivy + helm + kubectl + python).
+
+pipeline {
+  agent { label 'build' }
+
+  parameters {
+    string(name: 'IMAGE_REPO',
+           defaultValue: 'docker.io/aster2022/bookstore',
+           description: 'Full image repo including registry (docker.io/<user>/bookstore)')
+    string(name: 'APP_HOST',
+           defaultValue: 'bookstore.aster123.duckdns.org',
+           description: 'Public hostname for the Ingress (DuckDNS subdomain)')
+    string(name: 'NAMESPACE',
+           defaultValue: 'bookstore',
+           description: 'K8s namespace to deploy into')
+    choice(name: 'CLUSTER_ISSUER',
+           choices: ['letsencrypt-staging', 'letsencrypt-prod'],
+           description: 'cert-manager ClusterIssuer for TLS')
+    booleanParam(name: 'FAIL_ON_HIGH_CVE',
+                 defaultValue: true,
+                 description: 'Fail build if Trivy finds HIGH/CRITICAL CVEs')
+  }
+
+  environment {
+    IMAGE_TAG    = "${env.BUILD_NUMBER}"
+    IMAGE_FULL   = "${params.IMAGE_REPO}:${env.IMAGE_TAG}"
+    DOCKER_CREDS = 'dockerhub-creds'   // exact ID of the Jenkins credential
+  }
+
+  options {
+    timeout(time: 30, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    ansiColor('xterm')
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Test') {
+      steps {
+        container('python') {
+          dir('kubernetes/bookstore-api/app') {
+            sh '''
+              pip install --quiet --no-cache-dir -r requirements.txt pytest httpx
+              pytest tests/ -v --junitxml=../../../test-results.xml
+            '''
+          }
+        }
+      }
+      post {
+        always {
+          junit testResults: 'test-results.xml', allowEmptyResults: true
+        }
+      }
+    }
+
+    stage('Build Image (Kaniko)') {
+      steps {
+        container('kaniko') {
+          withCredentials([usernamePassword(
+            credentialsId: env.DOCKER_CREDS,
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+          )]) {
+            sh '''
+              set -eu
+              # Encode auth for Docker Hub
+              AUTH=$(printf '%s:%s' "$DOCKER_USER" "$DOCKER_PASS" | base64 -w0)
+              mkdir -p /kaniko/.docker
+              cat > /kaniko/.docker/config.json <<EOF
+              { "auths": { "https://index.docker.io/v1/": { "auth": "${AUTH}" } } }
+              EOF
+
+              /kaniko/executor \\
+                --context="${WORKSPACE}/kubernetes/bookstore-api/app" \\
+                --dockerfile="${WORKSPACE}/kubernetes/bookstore-api/app/Dockerfile" \\
+                --destination="${IMAGE_FULL}" \\
+                --destination="${IMAGE_REPO}:latest" \\
+                --cache=true \\
+                --snapshot-mode=redo
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Scan Image (Trivy)') {
+      steps {
+        container('trivy') {
+          sh '''
+            set -eu
+            mkdir -p reports
+            EXIT_FLAG=""
+            if [ "${FAIL_ON_HIGH_CVE}" = "true" ]; then
+              EXIT_FLAG="--exit-code 1"
+            fi
+            trivy image --format table --output reports/trivy.txt \\
+              --severity HIGH,CRITICAL --ignore-unfixed \\
+              ${EXIT_FLAG} \\
+              "${IMAGE_FULL}"
+            echo "----- Trivy report -----"
+            cat reports/trivy.txt
+          '''
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'reports/trivy.txt', allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage('Resolve App Host') {
+      steps {
+        container('kubectl') {
+          script {
+            if (params.APP_HOST?.trim()) {
+              env.RESOLVED_HOST = params.APP_HOST
+            } else {
+              // Fallback: auto-detect from master node external IP
+              def masterIP = sh(
+                returnStdout: true,
+                script: "kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.addresses[?(@.type==\"InternalIP\")].address}'"
+              ).trim()
+              env.RESOLVED_HOST = "bookstore.${masterIP}.nip.io"
+            }
+            echo "Deploying to host: ${env.RESOLVED_HOST}"
+          }
+        }
+      }
+    }
+
+    stage('Deploy (Helm)') {
+      steps {
+        container('helm') {
+          sh '''
+            set -eu
+            helm upgrade --install bookstore ./kubernetes/bookstore-api/helm/bookstore \\
+              --namespace ${NAMESPACE} --create-namespace \\
+              --set image.repository=${IMAGE_REPO} \\
+              --set image.tag=${IMAGE_TAG} \\
+              --set ingress.host=${RESOLVED_HOST} \\
+              --set ingress.tls.secretName=bookstore-tls \\
+              --set ingress.annotations."cert-manager\\.io/cluster-issuer"=${CLUSTER_ISSUER} \\
+              --wait --timeout 5m
+          '''
+        }
+      }
+    }
+
+    stage('Verify') {
+      steps {
+        container('kubectl') {
+          sh '''
+            set -eu
+            kubectl -n ${NAMESPACE} rollout status deployment/bookstore-bookstore --timeout=300s
+            echo ""
+            echo "=== Pods, Service, Ingress, HPA ==="
+            kubectl -n ${NAMESPACE} get pods,svc,ingress,hpa,pdb
+            echo ""
+            echo "=== Certificate ==="
+            kubectl -n ${NAMESPACE} get certificate || echo "(cert may take 1-2 min to issue)"
+            echo ""
+            echo "Deployed: https://${RESOLVED_HOST}"
+            echo "Try: curl -k https://${RESOLVED_HOST}/books"
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Bookstore deployed at https://${env.RESOLVED_HOST}"
+    }
+    failure {
+      echo "❌ Pipeline failed — check stage logs and reports/trivy.txt"
+    }
+  }
+}

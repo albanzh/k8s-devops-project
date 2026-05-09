@@ -1,0 +1,31 @@
+---
+# Phase 1 main playbook — runs the cluster bootstrap end to end.
+#
+# The 4 plays are split by responsibility so you can re-run any single
+# stage with --start-at-task or by tagging in the future.
+
+- name: Phase 1a — Common system prep on ALL nodes
+  hosts: k8s_cluster
+  become: yes
+  roles:
+    - common
+    - containerd
+    - kubernetes
+
+- name: Phase 1b — Initialize K8s control plane on master
+  hosts: master
+  become: yes
+  roles:
+    - k8s_master
+
+- name: Phase 1c — Join workers to the cluster
+  hosts: workers
+  become: yes
+  roles:
+    - k8s_worker
+
+- name: Phase 1d — Install NGINX Ingress controller
+  hosts: master
+  become: yes
+  roles:
+    - nginx_ingress

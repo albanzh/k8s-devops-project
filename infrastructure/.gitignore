@@ -1,0 +1,20 @@
+# Terraform state and locals
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+
+# Generated files (re-created by terraform apply)
+ansible/inventory.ini
+
+# Sensitive variables (commit only example/template files)
+# *.tfvars   # ← uncomment if you want to keep tfvars secret
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

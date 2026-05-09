@@ -1,0 +1,42 @@
+# Elastic's Helm chart for Elasticsearch
+# Chart: elastic/elasticsearch
+#
+# DEMO CONFIG — single-node, no persistence, x-pack security disabled.
+# NOT production-grade. For prod: 3-node, replicas=3, persistence on PVCs,
+# enable x-pack security.
+
+# Single-node "cluster" for demo
+replicas: 1
+minimumMasterNodes: 1
+
+# Skip persistent storage — data lost on pod restart, but saves PV setup
+persistence:
+  enabled: false
+
+# Heap = half of container memory (standard ES advice)
+esJavaOpts: "-Xmx1g -Xms1g"
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "2Gi"
+  limits:
+    cpu: "1"
+    memory: "2Gi"
+
+# Avoid the readiness check that needs cluster_state=green (single-node = yellow)
+clusterHealthCheckParams: "wait_for_status=yellow&timeout=1s"
+
+# Disable x-pack security (HTTPS auth between ES nodes/clients) — demo only.
+# Production: enable + provide TLS certs.
+extraEnvs:
+  - name: ELASTIC_PASSWORD
+    value: ""   # not used because security off
+  - name: xpack.security.enabled
+    value: "false"
+
+# Schedule on workers
+nodeSelector:
+  kubernetes.io/os: linux
+
+antiAffinity: "soft"   # we only have 1 replica anyway

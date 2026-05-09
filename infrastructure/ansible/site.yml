@@ -1,0 +1,30 @@
+---
+# Phase 1 — bootstrap K8s + ingress only.
+# Jenkins (Phase 3) and observability (Phase 7) are run manually
+# via separate playbooks AFTER terraform apply finishes.
+
+- name: Phase 1a — Common system prep on ALL nodes
+  hosts: k8s
+  become: true
+  roles:
+    - common
+    - containerd
+    - kubernetes
+
+- name: Phase 1b — Initialize K8s control plane on master
+  hosts: master
+  become: true
+  roles:
+    - k8s_master
+
+- name: Phase 1c — Join workers to the cluster
+  hosts: workers
+  become: true
+  roles:
+    - k8s_worker
+
+- name: Phase 1d — Install NGINX Ingress controller
+  hosts: master
+  become: true
+  roles:
+    - nginx_ingress

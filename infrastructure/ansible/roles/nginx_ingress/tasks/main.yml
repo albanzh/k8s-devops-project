@@ -1,0 +1,37 @@
+---
+# Bare-metal manifest patched to hostNetwork — kubeadm has no Azure CCM,
+# so a LoadBalancer Service would stay Pending. hostNetwork makes the
+# controller bind to ports 80/443 directly on each worker node.
+
+- name: Wait for all nodes Ready
+  become_user: "{{ ansible_user }}"
+  shell: |
+    NODES=$(kubectl get nodes --no-headers | wc -l)
+    READY=$(kubectl get nodes --no-headers | grep -c " Ready ")
+    [ "$NODES" -gt 0 ] && [ "$NODES" -eq "$READY" ]
+  register: nodes_ready
+  retries: 30
+  delay: 10
+  until: nodes_ready.rc == 0
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Apply NGINX Ingress baremetal manifest
+  become_user: "{{ ansible_user }}"
+  command: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.1/deploy/static/provider/baremetal/deploy.yaml
+
+- name: Patch ingress-nginx-controller for hostNetwork
+  become_user: "{{ ansible_user }}"
+  shell: |
+    kubectl -n ingress-nginx patch deployment ingress-nginx-controller --type=json -p='[
+      {"op": "replace", "path": "/spec/replicas", "value": 2},
+      {"op": "add",     "path": "/spec/template/spec/hostNetwork", "value": true},
+      {"op": "replace", "path": "/spec/template/spec/dnsPolicy", "value": "ClusterFirstWithHostNet"}
+    ]'
+  args:
+    executable: /bin/bash
+
+- name: Wait for ingress-nginx-controller
+  become_user: "{{ ansible_user }}"
+  command: kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=300s

@@ -1,0 +1,29 @@
+# Kibana — UI for Elasticsearch
+# Chart: elastic/kibana
+
+elasticsearchHosts: "http://elasticsearch-master:9200"
+
+resources:
+  requests: {cpu: 200m, memory: 512Mi}
+  limits:   {cpu: 1, memory: 1Gi}
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: kibana.aster123.duckdns.org   # ← edit before install
+      paths:
+        - path: /
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+    # basic-auth — uses logging-basic-auth secret (created in install README)
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: logging/logging-basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Kibana Restricted"
+  tls:
+    - secretName: kibana-tls
+      hosts:
+        - kibana.aster123.duckdns.org
+
+nodeSelector:
+  kubernetes.io/os: linux

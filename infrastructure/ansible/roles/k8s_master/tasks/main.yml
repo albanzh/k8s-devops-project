@@ -1,0 +1,90 @@
+---
+- name: Check if cluster is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: admin_conf
+
+- name: kubeadm init
+  command: >
+    kubeadm init
+      --kubernetes-version=1.28.2
+      --apiserver-advertise-address={{ k8s_node_ip }}
+      --apiserver-cert-extra-sans={{ ansible_host }}
+      --pod-network-cidr=192.168.0.0/16
+      --node-name={{ inventory_hostname }}
+  when: not admin_conf.stat.exists
+
+- name: Create .kube dir for {{ ansible_user }}
+  file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Copy admin.conf to user kubeconfig
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    remote_src: yes
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+
+# ── Calico via Tigera operator (VXLAN encap, MTU 1380 for Azure) ────
+- name: Install Tigera operator
+  become_user: "{{ ansible_user }}"
+  command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/tigera-operator.yaml
+  register: tigera
+  failed_when: tigera.rc != 0 and 'AlreadyExists' not in tigera.stderr
+  changed_when: tigera.rc == 0
+
+- name: Wait for Tigera operator
+  become_user: "{{ ansible_user }}"
+  command: kubectl -n tigera-operator rollout status deployment/tigera-operator --timeout=180s
+
+- name: Apply Calico Installation CR (VXLAN, 1380 MTU)
+  become_user: "{{ ansible_user }}"
+  shell: |
+    cat <<'EOF' | kubectl apply -f -
+    apiVersion: operator.tigera.io/v1
+    kind: Installation
+    metadata:
+      name: default
+    spec:
+      calicoNetwork:
+        ipPools:
+          - blockSize: 26
+            cidr: 192.168.0.0/16
+            encapsulation: VXLAN
+            natOutgoing: Enabled
+            nodeSelector: all()
+        mtu: 1380
+    ---
+    apiVersion: operator.tigera.io/v1
+    kind: APIServer
+    metadata:
+      name: default
+    spec: {}
+    EOF
+  args:
+    executable: /bin/bash
+
+- name: Wait for calico-system namespace to appear
+  become_user: "{{ ansible_user }}"
+  shell: until kubectl get ns calico-system >/dev/null 2>&1; do sleep 3; done
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Wait for calico-node DaemonSet
+  become_user: "{{ ansible_user }}"
+  command: kubectl -n calico-system rollout status daemonset/calico-node --timeout=420s
+
+- name: Generate kubeadm join command
+  command: kubeadm token create --print-join-command
+  register: join_cmd
+
+- name: Save join command as fact
+  set_fact:
+    k8s_join_command: "{{ join_cmd.stdout }}"

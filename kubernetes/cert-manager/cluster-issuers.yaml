@@ -1,0 +1,38 @@
+# Two ClusterIssuers — staging (for testing, no rate limits) and prod (real certs).
+#
+# Always start with staging when testing a new Ingress; only flip to prod
+# once you've seen a staging cert issued successfully. Let's Encrypt prod
+# has 5-cert-per-week-per-FQDN rate limits and you can lock yourself out
+# while debugging.
+#
+# Replace the email below with yours before applying.
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: alban.zheku@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: alban.zheku@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

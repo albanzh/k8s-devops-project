@@ -1,0 +1,49 @@
+---
+- name: Create apt keyrings dir
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Add Kubernetes apt GPG key (pkgs.k8s.io)
+  shell: |
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | \
+      gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add Kubernetes apt repo (pkgs.k8s.io)
+  apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /"
+    state: present
+    filename: kubernetes
+
+- name: Install kubelet, kubeadm, kubectl (1.28.2)
+  apt:
+    name:
+      - "kubelet=1.28.2-1.1"
+      - "kubeadm=1.28.2-1.1"
+      - "kubectl=1.28.2-1.1"
+    state: present
+    update_cache: yes
+
+- name: Hold packages
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubeadm
+    - kubelet
+    - kubectl
+
+- name: Pin kubelet --node-ip to private IP
+  copy:
+    dest: /etc/default/kubelet
+    content: 'KUBELET_EXTRA_ARGS=--node-ip={{ k8s_node_ip }}'
+    mode: '0644'
+
+- name: Enable kubelet
+  systemd:
+    name: kubelet
+    enabled: yes
+    daemon_reload: yes

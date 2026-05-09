@@ -1,0 +1,56 @@
+# ingress-nginx Helm chart values
+# Chart: ingress-nginx/ingress-nginx (https://kubernetes.github.io/ingress-nginx)
+#
+# We use hostNetwork mode — the controller binds to host ports 80/443 on every
+# node it lands on. That's because kubeadm clusters have no Azure
+# cloud-controller-manager, so a Service of type LoadBalancer would stay
+# Pending. With hostNetwork, traffic flows: client → node public IP → NGINX → pod.
+
+controller:
+  # Run as a DaemonSet so EVERY node (master + workers) serves ingress.
+  # If a node dies, the others keep serving. DNS can point at any node IP.
+  kind: DaemonSet
+
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+
+  # Tolerate the control-plane taint so master also runs an ingress pod.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+  # No K8s LoadBalancer Service (we use hostNetwork)
+  service:
+    enabled: false
+
+  # ingressClassName resources should target this class
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true
+
+  # Limit resource usage (these are conservative; bump for prod)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Useful for Prometheus scraping later
+  metrics:
+    enabled: true
+
+  # Default config tweaks
+  config:
+    use-forwarded-headers: "true"
+    compute-full-forwarded-for: "true"
+    use-proxy-protocol: "false"
+
+  # Admission webhook still needed for ingress validation
+  admissionWebhooks:
+    enabled: true
+    patch:
+      enabled: true
