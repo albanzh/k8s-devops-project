@@ -11,11 +11,23 @@ The Jenkins pipeline runs these in the `python` container before building the im
 import importlib
 import pytest
 from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
+
+
+def _reset_prom_registry():
+    """Unregister every collector so reload(main) can re-register without
+    'Duplicated timeseries' errors."""
+    for collector in list(REGISTRY._collector_to_names.keys()):
+        try:
+            REGISTRY.unregister(collector)
+        except KeyError:
+            pass
 
 
 @pytest.fixture
 def client():
     """Fresh app + seed data per test (avoids state bleed between tests)."""
+    _reset_prom_registry()
     import main
     importlib.reload(main)   # resets the in-memory `books` dict
     return TestClient(main.app)
