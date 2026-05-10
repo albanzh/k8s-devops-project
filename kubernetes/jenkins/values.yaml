@@ -36,12 +36,12 @@ controller:
   ingress:
     enabled: true
     ingressClassName: nginx
-    hostName: "jenkins.aster123.duckdns.org"   # ← edit before install
+    hostName: "jenkins.asterzheku.duckdns.org"   # ← edit before install
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-prod
     tls:
       - secretName: jenkins-tls
-        hosts: ["jenkins.aster123.duckdns.org"]   # ← match hostName above
+        hosts: ["jenkins.asterzheku.duckdns.org"]   # ← match hostName above
 
   # Resource ask — controller is heavy with plugins
   resources:

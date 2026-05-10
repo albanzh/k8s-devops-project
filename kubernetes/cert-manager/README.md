@@ -2,65 +2,99 @@
 
 Automatic TLS certificate provisioning via Let's Encrypt.
 
+## Context
+
+| | |
+|---|---|
+| **Depends on** | ingress-nginx (Phase 3) — ACME HTTP-01 challenge needs a working Ingress |
+| **Installs** | cert-manager + 2 ClusterIssuers (`letsencrypt-staging`, `letsencrypt-prod`) |
+| **Next phase** | Jenkins (Phase 5) |
+| **Master IP / Domain** | `20.229.55.144` / `asterzheku.duckdns.org` |
+
 ## How it works
 
-1. You annotate an Ingress: `cert-manager.io/cluster-issuer: letsencrypt-staging`
-2. cert-manager sees the annotation, creates a `Certificate` resource
-3. ACME HTTP-01 challenge: cert-manager places a token at `/.well-known/acme-challenge/<token>`
-4. Let's Encrypt fetches it via NGINX → confirms you own the domain
-5. cert-manager stores the issued cert in a K8s Secret
-6. NGINX reads the Secret, serves HTTPS
+```
+You annotate an Ingress with cert-manager.io/cluster-issuer: letsencrypt-staging
+            ↓
+cert-manager creates a Certificate resource
+            ↓
+ACME HTTP-01 challenge: cert-manager places a token at /.well-known/acme-challenge/<token>
+            ↓
+Let's Encrypt fetches it via NGINX → confirms domain ownership
+            ↓
+cert-manager stores the issued cert in a K8s Secret
+            ↓
+NGINX reads the Secret and serves HTTPS
+```
 
-Total time: 30-90 sec from Ingress creation to working HTTPS.
+Total: ~30–90 sec from Ingress creation to working HTTPS (after the issuer is ready).
 
-## Install
+## Pre-requisites
+
+- ingress-nginx healthy (3 controller pods Running, one per node) — see [../ingress-nginx/README.md](../ingress-nginx/README.md)
+- Helm installed on master — `ssh ... 'helm version --short'` works
+- DuckDNS resolves `asterzheku.duckdns.org` to the LB IP
+
+## Step 1 — Push values.yaml + cluster-issuers.yaml to master
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<EOF
+scp -i ~/ssh_key.pem \
+  /mnt/c/Users/user/Desktop/kube/k8s-devops-project/kubernetes/cert-manager/values.yaml \
+  /mnt/c/Users/user/Desktop/kube/k8s-devops-project/kubernetes/cert-manager/cluster-issuers.yaml \
+  azureuser@20.229.55.144:/tmp/
+```
+
+## Step 2 — Add Helm repo
+
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
 helm repo add jetstack https://charts.jetstack.io --force-update
 helm repo update
 EOF
+```
 
-# Copy values.yaml + cluster-issuers.yaml to master
-scp -i ~/ssh_key.pem values.yaml cluster-issuers.yaml \
-  azureuser@51.136.90.206:/tmp/
+## Step 3 — Install cert-manager + apply ClusterIssuers
 
-# Install
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<'EOF'
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
 helm upgrade --install cert-manager jetstack/cert-manager \
   --namespace cert-manager --create-namespace \
   --version v1.14.0 \
   -f /tmp/values.yaml \
   --wait --timeout 5m
 
-# Wait for the webhook before applying ClusterIssuers (else they fail with
-# "failed calling webhook" until the webhook service has endpoints)
+# Wait for the webhook BEFORE applying ClusterIssuers — otherwise they fail with
+# "failed calling webhook" until the webhook service has endpoints.
 kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=180s
 until kubectl get endpoints cert-manager-webhook -n cert-manager -o jsonpath='{.subsets[*].addresses[*].ip}' | grep -q .; do
   echo "waiting for webhook endpoints..."; sleep 5
 done
 
-# Apply both ClusterIssuers
 kubectl apply -f /tmp/cluster-issuers.yaml
+
+echo ""
+echo "=== ClusterIssuers ==="
 kubectl get clusterissuer
 EOF
 ```
 
 ## Verify
 
-```bash
-kubectl get clusterissuer
-# Expect: both rows show READY=True
-#   NAME                  READY   STATUS
-#   letsencrypt-prod      True    The ACME account was registered with the ACME server
-#   letsencrypt-staging   True    The ACME account was registered with the ACME server
+Both ClusterIssuers must show `READY=True`:
+
+```
+NAME                  READY   STATUS                                                 AGE
+letsencrypt-prod      True    The ACME account was registered with the ACME server   5s
+letsencrypt-staging   True    The ACME account was registered with the ACME server   5s
 ```
 
-## Smoke test (issue a real cert end-to-end)
+✅ Both `True` → done. Proceed to Phase 5 (Jenkins).
+
+## Smoke test (optional — issue a real cert end-to-end)
 
 ```bash
-DOMAIN="aster123.duckdns.org"   # ← your real DNS name
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<EOF
+DOMAIN="asterzheku.duckdns.org"
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<EOF
 kubectl create ns cert-test --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n cert-test create deployment httpbin --image=kennethreitz/httpbin --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n cert-test expose deployment httpbin --port=80 --dry-run=client -o yaml | kubectl apply -f -
@@ -86,25 +120,43 @@ spec:
 EOI
 EOF
 
+
 # Wait 1-2 min, then:
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 \
-  'kubectl get certificate -A'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get certificate -A'
 # Expect: httpbin-tls READY=True
 
-# From your laptop (use -k because it's a STAGING cert; not browser-trusted)
-curl -kI https://$DOMAIN
+curl -kI https://$DOMAIN   # -k because it's a STAGING cert
 ```
 
-Cleanup once smoke test passes:
-```bash
-kubectl delete namespace cert-test
+# 1. Cleanup the smoke test (releases the namespace + Ingress)
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl delete namespace cert-test'
+
+# 2. Confirm clean state
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 \
+  'kubectl get clusterissuer && echo "---" && kubectl get certificate -A'
+
+
+## When to flip an Ingress to letsencrypt-prod
+
+After a staging cert issues successfully **at least once**. Edit the Ingress annotation:
+```yaml
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod   # was: letsencrypt-staging
 ```
+
+Delete the staging Secret so cert-manager re-issues from prod:
+```bash
+kubectl -n <namespace> delete secret <whatever-tls>
+```
+
+Wait 1-2 min, then `curl -I https://...` works without `-k` (browser-trusted).
 
 ## Upgrade
 
 ```bash
 helm upgrade cert-manager jetstack/cert-manager \
-  -n cert-manager -f values.yaml --version v1.14.0 --wait
+  -n cert-manager -f /tmp/values.yaml --version v1.14.0 --wait
 ```
 
 ## Rollback
@@ -113,26 +165,22 @@ helm upgrade cert-manager jetstack/cert-manager \
 helm rollback cert-manager -n cert-manager
 ```
 
-## Skepticism / common failures
+## Common failures + fixes
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `ClusterIssuer READY=False` | DNS unreachable from cluster | check pods can resolve external names |
-| `failed calling webhook ... timeout` | webhook not reachable cross-node | usually Calico MTU or VXLAN; restart calico-node pods |
-| Cert stuck Pending >5 min | ACME challenge can't reach back to your cluster | `nslookup yourdomain.com` from outside; if it doesn't resolve, fix DNS first |
-| `urn:ietf:params:acme:error:rateLimited` | hit LE prod rate limit | switch issuer to `letsencrypt-staging` for ~1 week to recover |
-| Ingress works but no cert | annotation typo | check `kubectl describe ingress` |
+| `ClusterIssuer READY=False` | DNS unreachable from cluster | check pods can resolve external names: `kubectl run dns-test --rm -it --image=busybox --restart=Never -- nslookup acme-staging-v02.api.letsencrypt.org` |
+| `failed calling webhook ... timeout` | Webhook not reachable cross-node | usually Calico MTU or VXLAN — restart calico-node pods |
+| Cert stuck Pending >5 min | ACME challenge can't reach back to cluster | `nslookup yourdomain.com` from outside; verify DuckDNS points at LB IP |
+| `urn:ietf:params:acme:error:rateLimited` | Hit LE prod rate limit (5 certs/week per FQDN) | switch issuer to `letsencrypt-staging` for ~1 week to recover |
+| Ingress works but no cert | Annotation typo | `kubectl describe ingress <name>` and check the annotation |
 
-## When to flip to letsencrypt-prod
+## Skepticism
 
-After a staging cert issues successfully **at least once**. Edit your Ingress:
-```yaml
-metadata:
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod   # was: letsencrypt-staging
-```
-Delete the old TLS Secret so cert-manager re-issues:
-```bash
-kubectl -n <namespace> delete secret <whatever-tls>
-```
-Wait 1-2 min, then `curl -I https://...` should work without `-k`.
+- **HTTP-01 challenge requires port 80 reachable** — works because Azure NSG allows :80 from `0.0.0.0/0`. Don't lock that down without using DNS-01 challenge.
+- **Staging issuer's CA isn't browser-trusted** — that's the point; lets you iterate without rate limits.
+- **No DNS-01 fallback configured** — if you ever need wildcard certs (`*.example.com`), HTTP-01 won't work; you'd need DNS-01 with API access to your DNS provider.
+
+## Next phase →
+
+[Phase 5 — Jenkins](../jenkins/README.md)

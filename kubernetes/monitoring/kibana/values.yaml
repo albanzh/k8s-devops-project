@@ -11,7 +11,7 @@ ingress:
   enabled: true
   className: nginx
   hosts:
-    - host: kibana.aster123.duckdns.org   # ← edit before install
+    - host: kibana.asterzheku.duckdns.org   # ← edit before install
       paths:
         - path: /
   annotations:
@@ -23,7 +23,7 @@ ingress:
   tls:
     - secretName: kibana-tls
       hosts:
-        - kibana.aster123.duckdns.org
+        - kibana.asterzheku.duckdns.org
 
 nodeSelector:
   kubernetes.io/os: linux

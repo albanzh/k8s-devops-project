@@ -10,13 +10,13 @@ grafana:
     enabled: true
     ingressClassName: nginx
     hosts:
-      - grafana.aster123.duckdns.org   # ← edit before install
+      - grafana.asterzheku.duckdns.org   # ← edit before install
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-staging
     tls:
       - secretName: grafana-tls
         hosts:
-          - grafana.aster123.duckdns.org
+          - grafana.asterzheku.duckdns.org
 
   persistence:
     enabled: true
@@ -42,7 +42,7 @@ prometheus:
     enabled: true
     ingressClassName: nginx
     hosts:
-      - prometheus.aster123.duckdns.org
+      - prometheus.asterzheku.duckdns.org
     paths:
       - /
     annotations:
@@ -54,7 +54,7 @@ prometheus:
     tls:
       - secretName: prometheus-tls
         hosts:
-          - prometheus.aster123.duckdns.org
+          - prometheus.asterzheku.duckdns.org
 
   prometheusSpec:
     retention: 15d

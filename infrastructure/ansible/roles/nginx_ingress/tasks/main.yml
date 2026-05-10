@@ -1,7 +1,11 @@
 ---
-# Bare-metal manifest patched to hostNetwork — kubeadm has no Azure CCM,
-# so a LoadBalancer Service would stay Pending. hostNetwork makes the
-# controller bind to ports 80/443 directly on each worker node.
+# Bare-metal manifest patched to hostNetwork + control-plane toleration —
+# kubeadm has no Azure CCM, so a LoadBalancer Service would stay Pending.
+# hostNetwork makes the controller bind to ports 80/443 directly on each node.
+#
+# replicas = node_count = 3, with toleration for the master taint, means
+# 1 controller pod runs on EVERY node (master + both workers). DNS can point
+# at the master IP and traffic still reaches NGINX.
 
 - name: Wait for all nodes Ready
   become_user: "{{ ansible_user }}"
@@ -17,21 +21,66 @@
   args:
     executable: /bin/bash
 
+- name: Count cluster nodes
+  become_user: "{{ ansible_user }}"
+  shell: kubectl get nodes --no-headers | wc -l
+  register: node_count_raw
+  changed_when: false
+
 - name: Apply NGINX Ingress baremetal manifest
   become_user: "{{ ansible_user }}"
   command: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.1/deploy/static/provider/baremetal/deploy.yaml
 
-- name: Patch ingress-nginx-controller for hostNetwork
+# Write patch JSON to a temp file (avoids Jinja/YAML quoting headaches).
+- name: Write ingress-nginx patch JSON
   become_user: "{{ ansible_user }}"
-  shell: |
-    kubectl -n ingress-nginx patch deployment ingress-nginx-controller --type=json -p='[
-      {"op": "replace", "path": "/spec/replicas", "value": 2},
-      {"op": "add",     "path": "/spec/template/spec/hostNetwork", "value": true},
-      {"op": "replace", "path": "/spec/template/spec/dnsPolicy", "value": "ClusterFirstWithHostNet"}
-    ]'
-  args:
-    executable: /bin/bash
+  copy:
+    dest: /tmp/ingress-nginx-patch.json
+    mode: '0644'
+    content: |
+      {
+        "spec": {
+          "replicas": {{ node_count_raw.stdout }},
+          "strategy": { "type": "Recreate", "rollingUpdate": null },
+          "template": {
+            "spec": {
+              "hostNetwork": true,
+              "dnsPolicy": "ClusterFirstWithHostNet",
+              "tolerations": [
+                { "key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule" }
+              ]
+            }
+          }
+        }
+      }
 
-- name: Wait for ingress-nginx-controller
+# Single patch: replicas=node_count, hostNetwork=true, master toleration,
+# AND strategy=Recreate (so rolling updates don't deadlock on port 80 conflicts
+# between old + new pods on the same node).
+- name: Patch ingress-nginx-controller (hostNetwork + master toleration + replicas + Recreate strategy)
+  become_user: "{{ ansible_user }}"
+  command: >
+    kubectl -n ingress-nginx patch deployment ingress-nginx-controller
+    --type=merge --patch-file=/tmp/ingress-nginx-patch.json
+
+# Force-delete all controller pods. With strategy=Recreate, K8s would do this anyway,
+# but doing it explicitly speeds up convergence and handles the case where the patch
+# was a no-op (e.g., re-running the role).
+- name: Force-delete existing ingress-nginx-controller pods
+  become_user: "{{ ansible_user }}"
+  command: kubectl -n ingress-nginx delete pods -l app.kubernetes.io/component=controller --force --grace-period=0 --ignore-not-found
+  changed_when: false
+
+- name: Wait for ingress-nginx-controller rollout (one pod per node)
   become_user: "{{ ansible_user }}"
   command: kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=300s
+
+- name: Show final ingress-nginx pod placement
+  become_user: "{{ ansible_user }}"
+  command: kubectl get pods -n ingress-nginx -o wide
+  register: ingress_pods
+  changed_when: false
+
+- name: Display ingress-nginx pod placement
+  debug:
+    var: ingress_pods.stdout_lines

@@ -10,11 +10,13 @@ For **everything that comes after** (Jenkins, the bookstore app, observability),
 
 | | |
 |---|---|
-| Master | `51.136.90.206` |
-| Worker-1 | `20.101.64.184` |
-| Worker-2 | `52.157.100.141` |
+| **LB public IP** (DuckDNS → here) | **`52.236.143.47`** ← Azure Load Balancer |
+| Master (SSH only) | `20.229.55.144` |
+| Worker-1 | `104.40.249.39` |
+| Worker-2 | `52.142.215.164` |
 | SSH key | `~/ssh_key.pem` |
 | Cluster | K8s 1.28.2, Calico v3.26 (VXLAN+1380), NGINX Ingress v1.8.1 |
+| Public ingress entry | Azure Standard LB → all 3 nodes (HA, TCP probe on :80) |
 
 Get fresh values anytime:
 ```bash
@@ -28,10 +30,10 @@ terraform output
 
 ```
 infrastructure/
-├── main.tf                  ← VMs, NSG, Public IPs, NICs, Ansible trigger
+├── main.tf                  ← VMs, NSG, Public IPs, NICs, Load Balancer, Ansible trigger
 ├── providers.tf             ← terraform 1.0+, azurerm 3.x, tls, local, null
 ├── variables.tf             ← subscription_id, username, letsencrypt_email, admin_source_cidr
-├── outputs.tf               ← master_public_ip, ssh_command_master, summary
+├── outputs.tf               ← lb_public_ip, master_public_ip, ssh_command_master, summary
 ├── terraform.tfvars         ← YOUR values (gitignored)
 ├── command.md               ← cluster diagnostic commands (run these anytime)
 └── ansible/
@@ -40,6 +42,9 @@ infrastructure/
     └── roles/               ← common, containerd, kubernetes, k8s_master,
                                 k8s_worker, nginx_ingress
 ```
+
+Module dependencies in [`../modules/resources/azure/`](../modules/resources/azure/):
+`ssh-key`, `data-resource-group`, `data-subnet`, `public-ip`, `nsg`, `network-interface`, `linux-server`, `load-balancer`.
 
 ---
 
@@ -63,9 +68,11 @@ terraform destroy -auto-approve
 Removes all VMs/NICs/Public IPs (~3 min). The pre-existing RG/VNet/Subnet stay.
 
 ## Verify cluster health
+ Verify cluster health (1 min)                                                                      ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get nodes -o wide && echo "---" && kubectl get pods -A'
+
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get nodes && kubectl get pods -A | grep -vE "Running|Completed"'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get nodes && kubectl get pods -A | grep -vE "Running|Completed"'
 ```
 
 For a deeper sweep, see [command.md](command.md).
@@ -111,17 +118,19 @@ The original 8-step spec maps to these 8 phases as follows:
 DuckDNS gives you a free `*.duckdns.org` subdomain pointing wherever you want.
 
 1. https://www.duckdns.org → log in (GitHub/Google)
-2. Add a subdomain — pick something unique, e.g. `aster123` or `bookstore-demo`
-3. Set **current ip** to your master IP from `terraform output -raw master_public_ip` → click **update ip**
+2. Add a subdomain — e.g. `asterzheku`
+3. Set **current ip** to the **LB public IP** from `terraform output -raw lb_public_ip` → click **update ip**
+
+> ⚠️ **Point at the LB IP, NOT the master IP.** The LB has a stable public IP and gives you HA — any healthy node serves traffic. Master IP works too but you lose HA + the master IP rotates on every redeploy.
 
 Verify from WSL:
 ```bash
-DOMAIN="aster123.duckdns.org"   # ← whatever you picked
-nslookup $DOMAIN              # should return your master IP
+DOMAIN="asterzheku.duckdns.org"
+nslookup $DOMAIN              # should return the LB IP (52.236.143.47)
 curl -I http://$DOMAIN        # should return: HTTP/1.1 404 Not Found, Server: nginx
 ```
 
-DuckDNS gives you the **wildcard** for free: `jenkins.aster123.duckdns.org`, `bookstore.aster123.duckdns.org`, `grafana.aster123.duckdns.org`, etc. all resolve to the same IP automatically. No extra config needed for sub-hosts.
+DuckDNS gives you the **wildcard** for free: `jenkins.asterzheku.duckdns.org`, `bookstore.asterzheku.duckdns.org`, `grafana.asterzheku.duckdns.org`, etc. all resolve to the LB IP automatically. No extra config needed for sub-hosts.
 
 After step 3, you have a stable hostname. Proceed to Phase 3.
 
@@ -160,10 +169,10 @@ cd ../bookstore-api/
 #        Script Path: kubernetes/bookstore-api/Jenkinsfile
 #   5. Build with Parameters:
 #        IMAGE_REPO     = docker.io/<your_user>/bookstore
-#        APP_HOST       = bookstore.aster123.duckdns.org
+#        APP_HOST       = bookstore.asterzheku.duckdns.org
 #        NAMESPACE      = bookstore
 #        CLUSTER_ISSUER = letsencrypt-staging  (flip to prod after first success)
-#   6. Verify: curl -k https://bookstore.aster123.duckdns.org/books
+#   6. Verify: curl -k https://bookstore.asterzheku.duckdns.org/books
 
 # ─── Phase 8: Observability (Prometheus/Grafana + ELK) ──────────────
 cd ../monitoring/
@@ -173,8 +182,8 @@ cd ../elasticsearch/  # → READ + run README.md
 cd ../kibana/         # → READ + run README.md
 cd ../filebeat/       # → READ + run README.md
 # After all 4 are up:
-#   • https://grafana.aster123.duckdns.org → Bookstore API dashboard
-#   • https://kibana.aster123.duckdns.org  → Discover → filter kubernetes.namespace:bookstore
+#   • https://grafana.asterzheku.duckdns.org → Bookstore API dashboard
+#   • https://kibana.asterzheku.duckdns.org  → Discover → filter kubernetes.namespace:bookstore
 ```
 
 Each subfolder has its own:
@@ -189,7 +198,7 @@ See [command.md](command.md) — full health-sweep SSH block + per-component dri
 
 Quick "is it alive?" one-liner:
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get nodes && echo "---" && kubectl get pods -A | grep -vE "Running|Completed"'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get nodes && echo "---" && kubectl get pods -A | grep -vE "Running|Completed"'
 ```
 
 If the second part returns just the header, **everything is healthy**.
@@ -198,24 +207,32 @@ If the second part returns just the header, **everything is healthy**.
 
 ## When IPs change (after destroy + apply)
 
-Replace `51.136.90.206`, `20.101.64.184`, `52.157.100.141` everywhere in this folder with new values:
+Four IPs can change across `terraform destroy` + `terraform apply`:
+- **LB public IP** — `52.236.143.47` (rotates on full destroy; otherwise stable)
+- Master public IP — `20.229.55.144`
+- Worker-1 — `104.40.249.39`
+- Worker-2 — `52.142.215.164`
 
+Get new values:
 ```bash
-# Get new IPs
 cd /mnt/c/Users/user/Desktop/kube/k8s-devops-project/infrastructure
 terraform output
-
-# Update DuckDNS in browser to point at the new master IP
 ```
 
-Then update the IPs in the per-component READMEs the same way (4 files use them):
-- `infrastructure/README.md`
-- `kubernetes/ingress-nginx/README.md`
-- `kubernetes/cert-manager/README.md`
-- `kubernetes/jenkins/README.md`
-
-A `find /grep` + `sed -i` loop handles it in 1 command:
+Then:
+1. **Update DuckDNS** to point at the new `lb_public_ip` (browser, ~10 sec)
+2. **Find/replace IPs** across `.md`, `.yaml`, `Jenkinsfile`:
 ```bash
-find /mnt/c/Users/user/Desktop/kube/k8s-devops-project -name "*.md" -exec \
-  sed -i 's/51.136.90.206/<NEW_MASTER_IP>/g' {} \;
+cd /mnt/c/Users/user/Desktop/kube/k8s-devops-project
+find . -type f \( -name "*.md" -o -name "*.yaml" -o -name "Jenkinsfile" \) -exec sed -i \
+  -e 's/52\.236\.137\.184/<NEW_LB_IP>/g' \
+  -e 's/51\.124\.110\.230/<NEW_MASTER_IP>/g' \
+  -e 's/20\.93\.153\.178/<NEW_WORKER1_IP>/g' \
+  -e 's/20\.71\.107\.113/<NEW_WORKER2_IP>/g' \
+  {} \;
+```
+3. **Push the updates to GitHub** so Jenkins picks them up:
+```bash
+git commit -am "Update IPs after redeploy"
+git push
 ```

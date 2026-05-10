@@ -1,6 +1,6 @@
 # Kubernetes diagnostic commands
 
-> Replace `51.136.90.206` with your current master IP from `terraform output -raw master_public_ip`.
+> Replace `20.229.55.144` with your current master IP from `terraform output -raw master_public_ip`.
 
 ---
 
@@ -9,7 +9,7 @@
 Run this once after every deploy or whenever something feels off:
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<'EOF'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
 echo "════════ 1. NODES (all should be Ready) ════════"
 kubectl get nodes -o wide
 
@@ -124,7 +124,7 @@ kubectl run -it --rm netshoot --image=nicolaka/netshoot --restart=Never -- \
 ## Quickest "is it alive?" check (one-liner)
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get nodes && echo "---" && kubectl get pods -A | grep -vE "Running|Completed"'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get nodes && echo "---" && kubectl get pods -A | grep -vE "Running|Completed"'
 ```
 
 If the second part shows just the header, **everything is healthy**.
@@ -135,20 +135,20 @@ If the second part shows just the header, **everything is healthy**.
 
 ```bash
 # DNS resolves?
-nslookup aster123.duckdns.org
+nslookup asterzheku.duckdns.org
 
 # Port 80 reachable on each node?
-curl -I http://51.136.90.206
-curl -I http://20.101.64.184
-curl -I http://52.157.100.141
+curl -I http://20.229.55.144
+curl -I http://104.40.249.39
+curl -I http://52.142.215.164
 # Expect: HTTP/1.1 404 Not Found, Server: nginx
 
 # Port 443 reachable?
-curl -kI https://51.136.90.206
+curl -kI https://20.229.55.144
 # Expect: HTTP/2 404 (or whatever Ingress rule applies)
 
 # Port 22 reachable?
-nc -zv 51.136.90.206 22
+nc -zv 20.229.55.144 22
 # Expect: succeeded!
 ```
 

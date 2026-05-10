@@ -1,6 +1,15 @@
-# Bookstore API — Phases 5 + 6
+# Bookstore API — Phases 5 + 6 + 7
 
-FastAPI bookstore with the 4 endpoints from the spec, plus `/health` and `/metrics`. Multi-stage Dockerfile, non-root user, healthcheck.
+FastAPI bookstore with the 4 endpoints from the spec, plus `/health` and `/metrics`. Multi-stage Dockerfile, non-root user, healthcheck. Helm chart with ingress + TLS + HPA + PDB. Jenkinsfile for CI/CD via Kaniko + Trivy + Helm.
+
+## Context
+
+| | |
+|---|---|
+| **Depends on** | Jenkins (Phase 5), cert-manager (Phase 4), `dockerhub-creds` credential in Jenkins |
+| **Installs** | bookstore Deployment + Service + Ingress + HPA + PDB + ServiceMonitor (1 namespace) |
+| **Next phase** | Observability (Phase 8 — `../monitoring/`) |
+| **Public URL** | `https://bookstore.asterzheku.duckdns.org` |
 
 ## Endpoints
 
@@ -18,17 +27,33 @@ FastAPI bookstore with the 4 endpoints from the spec, plus `/health` and `/metri
 
 ```
 bookstore-api/
-├── README.md            (this file)
-└── app/
-    ├── main.py          ← FastAPI app
-    ├── requirements.txt
-    ├── Dockerfile       ← multi-stage, non-root, HEALTHCHECK
-    ├── .dockerignore
-    └── tests/
-        └── test_api.py  ← 11 pytest cases (covers all endpoints + edge cases)
+├── README.md             (this file)
+├── Jenkinsfile           ← Phase 7: CI/CD pipeline (Test → Build → Scan → Deploy → Verify)
+├── app/                  ← Phases 5+6: code + container
+│   ├── main.py           ← FastAPI app
+│   ├── requirements.txt
+│   ├── Dockerfile        ← multi-stage, non-root, HEALTHCHECK
+│   ├── .dockerignore
+│   └── tests/
+│       └── test_api.py   ← 11 pytest cases (covers all endpoints + edge cases)
+└── helm/bookstore/       ← Phase 7: Helm chart for K8s deploy
+    ├── Chart.yaml
+    ├── values.yaml       ← image repo, ingress host, TLS, HPA, PDB, ServiceMonitor
+    └── templates/
+        ├── _helpers.tpl
+        ├── deployment.yaml
+        ├── service.yaml
+        ├── ingress.yaml
+        ├── hpa.yaml
+        ├── pdb.yaml
+        └── servicemonitor.yaml
 ```
 
-## Run locally — Python only
+---
+
+## Phase 5+6 — Run locally (sanity check before CI)
+
+### Run the app
 
 ```bash
 cd app
@@ -37,40 +62,130 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Then in another shell:
+In another shell:
 ```bash
 curl http://localhost:8000/books
 curl http://localhost:8000/health
 curl http://localhost:8000/metrics
-open http://localhost:8000/docs   # Swagger UI
+# open http://localhost:8000/docs in a browser for Swagger UI
 ```
 
-## Test
+### Test
 
 ```bash
 cd app
 pip install pytest httpx
 pytest tests/ -v
 ```
+Expected: **11 passed**.
 
-Expected: 11 passed.
-
-## Build the container locally
+### Build container locally
 
 ```bash
 cd app
 docker build -t bookstore:local .
-docker run --rm -p 8000:8000 bookstore:local
-# in another shell:
+docker run --rm -p 8000:8000 -d --name bookstore-test bookstore:local
+sleep 5
 curl http://localhost:8000/books
-docker stop $(docker ps -q -f ancestor=bookstore:local)
+docker stop bookstore-test
 ```
 
-## What's NOT here yet (Phase 7)
+Image size should be ~120 MB.
 
-These come when you say "go Phase 7":
-- **Helm chart** (`helm/bookstore/`) — ingress + TLS + replicas + HPA + PDB + ServiceMonitor
-- **Jenkinsfile** — Test → Build (Kaniko) → Scan (Trivy) → Deploy (Helm) → Verify
+---
+
+## Phase 7 — Run the CI/CD pipeline
+
+### Prerequisites
+
+1. **Jenkins is up** (Phase 5 of project README) — `https://jenkins.asterzheku.duckdns.org`
+2. **`dockerhub-creds` credential** added to Jenkins UI (Username + Docker Hub access token, ID exactly `dockerhub-creds`)
+3. **Project pushed to GitHub** — Jenkins clones from there
+4. **`helm/bookstore/values.yaml` line 9 + `Jenkinsfile` line 20** set to YOUR Docker Hub username
+
+### Set your Docker Hub username (one-time)
+
+```bash
+DOCKER_USER="aster2022"   # ← your Docker Hub username
+sed -i "s|YOUR_DOCKERHUB_USER|$DOCKER_USER|g" helm/bookstore/values.yaml Jenkinsfile
+git diff      # confirm only the username changed
+git add . && git commit -m "Set Docker Hub user" && git push
+```
+
+### Create the pipeline in Jenkins UI
+
+1. Jenkins home → **+ New Item** → name: `bookstore` → **Pipeline** → OK
+2. **Pipeline** section:
+   - Definition: `Pipeline script from SCM`
+   - SCM: `Git`
+   - Repo URL: `https://github.com/<youruser>/k8s-devops-project.git`
+   - Branch: `*/main`
+   - Script Path: `kubernetes/bookstore-api/Jenkinsfile`
+3. **Save**
+
+### First build
+
+**Build with Parameters**:
+
+| Param | Value |
+|-------|-------|
+| `IMAGE_REPO` | `docker.io/<your_user>/bookstore` |
+| `APP_HOST` | `bookstore.asterzheku.duckdns.org` |
+| `NAMESPACE` | `bookstore` |
+| `CLUSTER_ISSUER` | `letsencrypt-staging` (first time) |
+| `FAIL_ON_HIGH_CVE` | `true` |
+
+Stages run in order: **Checkout → Test → Build (Kaniko) → Scan (Trivy) → Resolve host → Deploy (Helm) → Verify**. Total: ~7-10 min.
+
+While it runs, watch K8s in another terminal:
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get pods --all-namespaces -w'
+```
+
+### Verify deployment
+
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 \
+  'kubectl get pods,svc,ingress,certificate,hpa,pdb -n bookstore'
+
+curl -k https://bookstore.asterzheku.duckdns.org/books
+curl -k https://bookstore.asterzheku.duckdns.org/health
+# Browser: https://bookstore.asterzheku.duckdns.org/docs
+```
+
+### Flip to production cert (after staging works)
+
+In Jenkins → `bookstore` → **Build with Parameters** → set `CLUSTER_ISSUER = letsencrypt-prod`. cert-manager re-issues with the trusted CA; browser padlock turns green.
+
+---
+
+## Common pipeline failures + fixes
+
+| Stage | Symptom | Fix |
+|-------|---------|-----|
+| Test | `pytest: command not found` | wrong path — Jenkinsfile uses `dir('kubernetes/bookstore-api/app')` from repo root |
+| Build (Kaniko) | `denied: requested access to the resource is denied` | `dockerhub-creds` missing or wrong — verify credential ID + token has Write permission |
+| Scan (Trivy) | Build fails on HIGH CVE | re-run with `FAIL_ON_HIGH_CVE=false` to verify rest of pipeline; bump base image to fix CVEs properly |
+| Deploy (Helm) | `Error: failed to deploy ... namespace not found` | first run creates the namespace via `--create-namespace`, but if a previous half-failed run left junk: `kubectl delete ns bookstore` and retry |
+| Verify | Cert stuck Pending >2 min | `kubectl describe certificate -n bookstore bookstore-tls` and `kubectl describe challenge -n bookstore`. Usually DuckDNS hasn't propagated `bookstore.asterzheku.duckdns.org` yet — DuckDNS wildcards are automatic, but caches can lag |
+
+## Helm chart upgrade / rollback (manual, outside Jenkins)
+
+```bash
+# Tail what's deployed
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'helm list -n bookstore'
+
+# Rollback to previous revision (from inside master)
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'helm rollback bookstore -n bookstore'
+
+# Inspect rendered manifests without applying
+helm template bookstore ./helm/bookstore \
+  --set image.repository=docker.io/aster2022/bookstore \
+  --set image.tag=42 \
+  --set ingress.host=bookstore.asterzheku.duckdns.org
+```
+
+---
 
 ## Skepticism
 
@@ -78,3 +193,16 @@ These come when you say "go Phase 7":
 - **No authentication** — anyone with the URL can POST/PUT/DELETE. For a learning project this is fine; add OAuth/JWT before exposing publicly.
 - **No rate limiting** — same caveat. Fine inside a private learning cluster, not OK for the public internet.
 - **JSON logging requires `python-json-logger`** — if the import fails (e.g., wrong base image), the app falls back to plain text. Logs still work, ELK parsing degrades.
+- **`installLatestPlugins` in Jenkins values + plugin pinning** — Jenkins controller image (`lts-jdk17`) gets latest LTS on each redeploy. Tradeoff: security patches arrive automatically; small chance of plugin breakage.
+- **Trivy `--ignore-unfixed`** — we skip CVEs without a fixed version available. Tradeoff: lower noise; you might miss real risks. Drop the flag for stricter scans.
+- **Helm release name = `bookstore` in namespace `bookstore`** → Deployment name ends up `bookstore-bookstore` because the chart fullname template prefixes Release.Name. The `Verify` stage hardcodes that string; if you ever rename the release, update Jenkinsfile line 173.
+
+---
+
+## Next phase →
+
+[Phase 8 — Observability (Prometheus + Grafana + ELK)](../monitoring/README.md)
+
+After Phase 7 deploys successfully, the bookstore is exposing `/metrics` (auto-scraped by Prometheus once kube-prometheus-stack is installed) and JSON logs (auto-collected by Filebeat). Install monitoring as 4 Helm releases in order: Prometheus → Elasticsearch → Kibana → Filebeat. Then:
+- Grafana → Dashboards → **Bookstore API** (auto-loaded from ConfigMap)
+- Kibana → Discover → filter `kubernetes.namespace : "bookstore"` → see structured logs from `log.info("book added", extra={...})`

@@ -20,7 +20,7 @@ pipeline {
            defaultValue: 'docker.io/aster2022/bookstore',
            description: 'Full image repo including registry (docker.io/<user>/bookstore)')
     string(name: 'APP_HOST',
-           defaultValue: 'bookstore.aster123.duckdns.org',
+           defaultValue: 'bookstore.asterzheku.duckdns.org',
            description: 'Public hostname for the Ingress (DuckDNS subdomain)')
     string(name: 'NAMESPACE',
            defaultValue: 'bookstore',

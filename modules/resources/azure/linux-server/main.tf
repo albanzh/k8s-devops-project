@@ -1,28 +1,17 @@
-# Creates Linux VMs (Ubuntu 22.04 LTS Gen2) using SSH-key auth only.
-
-variable "location"              { type = string }
-variable "network_interface_ids" { type = list(string) }
-variable "node_count"            { type = number }
-variable "node_name"             { type = list(string) }
-variable "node_size"             { type = string }
-variable "os_disk_size"          { type = number }
-variable "zones"                 { type = bool }
-variable "resource_group"        { type = string }
-variable "username"              { type = string }
-variable "ssh_public_key"        { type = string }
-variable "tags"                  { type = map(string) }
-
+# Creates Linux VMs using SSH-key auth only.
+# Each VM can have its own size (var.node_size[count.index]).
+# OS image defaults to Ubuntu 22.04 LTS Gen2 — override via image_* vars.
 resource "azurerm_linux_virtual_machine" "node" {
   count                 = var.node_count
   name                  = var.node_name[count.index]
   location              = var.location
   resource_group_name   = var.resource_group
-  size                  = var.node_size
+  size                  = var.node_size[count.index]
   admin_username        = var.username
   network_interface_ids = [var.network_interface_ids[count.index]]
   tags                  = var.tags
 
-  # Optional Availability Zone (1, 2, or 3 if av_zones is true; otherwise none)
+  # Optional Availability Zone (1/2/3 round-robin if zones=true; otherwise none)
   zone = var.zones ? tostring((count.index % 3) + 1) : null
 
   admin_ssh_key {
@@ -37,21 +26,13 @@ resource "azurerm_linux_virtual_machine" "node" {
   }
 
   source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
-    version   = "latest"
+    publisher = var.image_publisher
+    offer     = var.image_offer
+    sku       = var.image_sku
+    version   = var.image_version
   }
 
   identity {
     type = "SystemAssigned"
   }
-}
-
-output "node_id" {
-  value = azurerm_linux_virtual_machine.node[*].id
-}
-
-output "node_name" {
-  value = azurerm_linux_virtual_machine.node[*].name
 }

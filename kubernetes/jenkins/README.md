@@ -17,52 +17,126 @@ Pod templates:
 
 When a `Pipeline` runs `agent { label 'build' }`, Jenkins creates a Pod with all 6 containers, runs the stages inside the matching containers, then **deletes the pod** (`podRetention: Never`).
 
-## Pre-requisites
+---
 
-1. Cluster running, ingress healthy, cert-manager installed (Phases 1+2 done).
-2. **Default StorageClass** must exist — Jenkins persistent volume needs it.
+## Order of operations (do these in sequence)
 
-   ```bash
-   ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get storageclass'
-   # Expect: local-path (default) ...
-   ```
+| # | Step | Why it must come first |
+|---|------|------------------------|
+| 0 | (Optional) Clean up any stuck Helm release | If a previous install errored, Helm leaves a `pending-install` lock |
+| 1 | Install **cert-manager** + ClusterIssuers | Jenkins ingress requests a TLS cert; needs a working issuer |
+| 2 | Install **local-path-provisioner** (default StorageClass) | Jenkins needs a 10 Gi PVC; PVC stays Pending without a default class |
+| 3 | Create namespace + **admin credentials Secret** | values.yaml uses `existingSecret`; chart fails to start if missing |
+| 4 | Push values.yaml to master | Helm reads it from `/tmp/jenkins-values.yaml` |
+| 5 | `helm install jenkins` | The actual install |
+| 6 | Verify (pods, ingress, cert) | Make sure cert provisioned and pod is Ready |
+| 7 | Add `dockerhub-creds` in Jenkins UI | Needed for Phase 7 (bookstore CI/CD) |
 
-   If empty, install local-path-provisioner first:
-   ```bash
-   ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<'EOF'
-   kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
-   kubectl patch storageclass local-path \
-     -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-   EOF
-   ```
+---
 
-3. **DuckDNS** subdomain pointing at master IP (so `jenkins.<your>.duckdns.org` resolves).
+## Step 0 — Clean up if a previous install got stuck
 
-## Install
-
-### 1. Edit values.yaml — replace the hostname
-
-```yaml
-controller:
-  ingress:
-    hostName: "aster123.duckdns.org"   # ← your domain
-    tls:
-      - secretName: jenkins-tls
-        hosts: ["aster123.duckdns.org"]   # ← same domain
-```
-
-### 2. Push values.yaml to master
+Skip if you've never tried installing Jenkins. If you saw `Error: UPGRADE FAILED: another operation in progress`, run this first:
 
 ```bash
-scp -i ~/ssh_key.pem values.yaml azureuser@51.136.90.206:/tmp/jenkins-values.yaml
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
+echo "=== Current state ==="
+helm history jenkins -n jenkins 2>/dev/null
+kubectl get all -n jenkins 2>/dev/null
+
+echo ""
+echo "=== Cleaning up ==="
+helm uninstall jenkins -n jenkins 2>/dev/null || true
+kubectl delete namespace jenkins --ignore-not-found --timeout=60s
+sleep 5
+
+echo "=== After cleanup ==="
+helm list -A
+EOF
 ```
 
-### 3. Create namespace + admin credentials Secret
+`helm list -A` should NOT show a `jenkins` row.
 
-The chart references `jenkins-admin-credentials` via `existingSecret`. Create it first so the Helm install can find it.
+---
+
+## Step 1 — Install cert-manager + ClusterIssuers
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<'EOF'
+# Push values + cluster-issuers from your laptop
+scp -i ~/ssh_key.pem \
+  /mnt/c/Users/user/Desktop/kube/k8s-devops-project/kubernetes/cert-manager/values.yaml \
+  /mnt/c/Users/user/Desktop/kube/k8s-devops-project/kubernetes/cert-manager/cluster-issuers.yaml \
+  azureuser@20.229.55.144:/tmp/
+
+# Install on master
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
+helm repo add jetstack https://charts.jetstack.io --force-update
+helm repo update
+
+helm upgrade --install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --version v1.14.0 \
+  -f /tmp/values.yaml \
+  --wait --timeout 5m
+
+kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=180s
+until kubectl get endpoints cert-manager-webhook -n cert-manager -o jsonpath='{.subsets[*].addresses[*].ip}' | grep -q .; do
+  echo "waiting for webhook endpoints..."; sleep 5
+done
+
+kubectl apply -f /tmp/cluster-issuers.yaml
+
+echo ""
+echo "=== ClusterIssuers (both should be READY=True) ==="
+kubectl get clusterissuer
+EOF
+```
+
+✅ **Don't proceed until both issuers say `READY=True`.**
+
+---
+
+## Step 2 — Install local-path-provisioner (default StorageClass)
+
+> **What is local-path-provisioner?** A simple K8s storage driver that creates persistent volumes from local directories on the host node:
+> ```
+> PVC request
+>    ↓
+> local-path provisioner
+>    ↓
+> creates a directory on the node where the consuming pod schedules
+>    ↓
+> PVC becomes Bound
+> ```
+> Limitation: a PV is tied to the node where it was created. If that node dies, the data is gone. Fine for a learning cluster; production = use a CSI driver backed by Azure Managed Disks.
+
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
+
+kubectl patch storageclass local-path \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=120s
+
+echo ""
+echo "=== StorageClasses (local-path should say (default)) ==="
+kubectl get storageclass
+EOF
+```
+
+✅ Expected: row showing `local-path (default) ... rancher.io/local-path`.
+
+Already installed on a previous run? `kubectl get storageclass` already shows the row → skip this step.
+
+---
+
+## Step 3 — Create the Jenkins namespace + admin credentials Secret
+
+The chart's values.yaml has `controller.admin.existingSecret: jenkins-admin-credentials`. Create that Secret BEFORE installing — otherwise Jenkins startup fails.
+
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
 kubectl create namespace jenkins --dry-run=client -o yaml | kubectl apply -f -
 
 PASS=$(openssl rand -base64 18 | tr -d '/+=' | head -c 24)
@@ -72,15 +146,47 @@ kubectl -n jenkins create secret generic jenkins-admin-credentials \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo ""
-echo "=== Jenkins admin password (save this!) ==="
+echo "════════════════════════════════════════════"
+echo "Jenkins admin password (SAVE THIS NOW):"
 echo "$PASS"
+echo "════════════════════════════════════════════"
 EOF
 ```
 
-### 4. Install via Helm
+⚠️ **Copy the password.** You can also retrieve it later via:
+```bash
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 \
+  "kubectl -n jenkins get secret jenkins-admin-credentials -o jsonpath='{.data.jenkins-admin-password}' | base64 -d ; echo"
+```
+
+---
+
+## Step 4 — Push values.yaml to master
+
+Before pushing, confirm `controller.ingress.hostName` and `controller.ingress.tls[0].hosts[0]` in `values.yaml` match your DuckDNS:
+
+```yaml
+controller:
+  ingress:
+    hostName: "jenkins.asterzheku.duckdns.org"
+    tls:
+      - secretName: jenkins-tls
+        hosts: ["jenkins.asterzheku.duckdns.org"]
+```
+
+Push it:
+```bash
+scp -i ~/ssh_key.pem \
+  /mnt/c/Users/user/Desktop/kube/k8s-devops-project/kubernetes/jenkins/values.yaml \
+  azureuser@20.229.55.144:/tmp/jenkins-values.yaml
+```
+
+---
+
+## Step 5 — Install Jenkins via Helm
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<'EOF'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
 helm repo add jenkins https://charts.jenkins.io --force-update
 helm repo update
 
@@ -91,44 +197,59 @@ helm upgrade --install jenkins jenkins/jenkins \
 EOF
 ```
 
-Takes 5–10 min the first time (downloads controller image + resolves plugins).
+Takes 5–10 min on first run (pulls controller image + resolves ~80 plugins).
 
-## Verify
+---
+
+## Step 6 — Verify
 
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 bash <<'EOF'
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 bash <<'EOF'
 echo "=== Pods ==="
 kubectl get pods -n jenkins
 
 echo ""
 echo "=== Ingress + cert ==="
 kubectl get ingress,certificate -n jenkins
-
-echo ""
-echo "=== Get admin password ==="
-kubectl -n jenkins get secret jenkins-admin-credentials \
-  -o jsonpath='{.data.jenkins-admin-password}' | base64 -d ; echo
 EOF
 ```
 
-Open `https://jenkins.<your>.duckdns.org` in browser. Accept staging-cert warning. Log in with `admin` + the printed password.
+Expected:
+```
+=== Pods ===
+NAME        READY   STATUS    RESTARTS   AGE
+jenkins-0   2/2     Running   0          5m
 
-You should see the Jenkins home page. Go to **Manage Jenkins** → **Clouds** → there should be a `kubernetes` cloud listed (configured via JCasC).
+=== Ingress + cert ===
+NAME                                CLASS   HOSTS                          ADDRESS
+ingress.networking.k8s.io/jenkins   nginx   jenkins.asterzheku.duckdns.org ...
 
-## Add Docker Hub credential (for the bookstore pipeline later)
+NAME                                       READY   SECRET        AGE
+certificate.cert-manager.io/jenkins-tls    True    jenkins-tls   5m
+```
+
+Browser: `https://jenkins.asterzheku.duckdns.org` — accept the staging-cert warning, log in with `admin` + the saved password.
+
+In the Jenkins UI: **Manage Jenkins → Clouds** — confirm there's one cloud named `kubernetes` (auto-configured by JCasC).
+
+---
+
+## Step 7 — Add Docker Hub credential (for the bookstore pipeline later)
 
 This stays manual — secrets shouldn't be in values.yaml.
 
-1. Create a Docker Hub access token at https://hub.docker.com → Account Settings → Security
-2. In Jenkins: **Manage Jenkins** → **Credentials** → **(global)** → **Add Credentials**
+1. Create a Docker Hub access token at https://hub.docker.com → Account Settings → Personal access tokens → **Read & Write**
+2. Jenkins → **Manage Jenkins → Credentials → System → Global → + Add Credentials**:
    - Kind: `Username with password`
    - Username: your Docker Hub username
-   - Password: the access token
-   - **ID**: `dockerhub-creds`  ← exact string, the Jenkinsfile expects this
+   - Password: the access token (NOT your account password)
+   - **ID**: `dockerhub-creds` ← exact string, the Jenkinsfile expects this
 
-## Test the ephemeral agent
+---
 
-In Jenkins → New Item → Pipeline → name `agent-test`. Pipeline script:
+## Test the ephemeral agent (quick sanity check)
+
+In Jenkins → **+ New Item** → Pipeline → name `agent-test`. Pipeline script:
 
 ```groovy
 pipeline {
@@ -138,8 +259,8 @@ pipeline {
       steps {
         container('python')   { sh 'python --version' }
         container('helm')     { sh 'helm version --short' }
-        container('kubectl')  { sh 'kubectl version --client --short' }
-        container('trivy')    { sh 'trivy --version' }
+        container('kubectl')  { sh 'kubectl version --client | head -1' }
+        container('trivy')    { sh 'trivy --version | head -1' }
         container('kaniko')   { sh '/kaniko/executor version || true' }
       }
     }
@@ -147,17 +268,19 @@ pipeline {
 }
 ```
 
-Hit **Build Now**. In the K8s cluster:
+Save → **Build Now**. In another shell:
 ```bash
-ssh -i ~/ssh_key.pem azureuser@51.136.90.206 'kubectl get pods -n jenkins -w'
-# You'll see a build-agent-* pod appear, run, then disappear.
+ssh -i ~/ssh_key.pem azureuser@20.229.55.144 'kubectl get pods -n jenkins -w'
+# A build-agent-* pod appears, runs ~30 sec, then disappears.
 ```
 
-Logs in the Jenkins UI should show all five tool versions, then the pod terminates.
+The build console should print all 5 tool versions and finish SUCCESS.
+
+---
 
 ## Upgrade
 
-Edit `values.yaml`, then:
+Edit `values.yaml`, push it again, then:
 ```bash
 helm upgrade jenkins jenkins/jenkins -n jenkins -f /tmp/jenkins-values.yaml --wait
 ```
@@ -168,16 +291,17 @@ helm upgrade jenkins jenkins/jenkins -n jenkins -f /tmp/jenkins-values.yaml --wa
 helm rollback jenkins -n jenkins
 ```
 
-## Skepticism / common failures
+## Common failures + fixes
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Pod `Init:CrashLoopBackOff` | plugin dependency conflict | use `installLatestPlugins: true` (already set) |
-| Pod stuck `Pending` | no default StorageClass | install local-path-provisioner (see Pre-requisites) |
-| Ingress works but cert stays Pending | DNS not yet pointing at the master | `nslookup jenkins.<your>.duckdns.org` |
-| `helm install` 504 timeout | controller image download slow | bump `--timeout 20m`; usually completes after image cache warm |
-| `agent { label 'build' }` waits forever | `kubernetes` cloud not configured | check JCasC config: `kubectl -n jenkins get cm jenkins-jenkins-jcasc-config -o yaml` |
-| Kaniko fails with "401 unauthorized" | dockerhub-creds missing or wrong ID | re-create the credential with ID `dockerhub-creds` exactly |
+| `Error: UPGRADE FAILED: another operation in progress` | Stuck `pending-install` from a previous attempt | run Step 0 (cleanup), then retry from Step 5 |
+| Pod `Init:CrashLoopBackOff` with plugin compatibility error | Plugin requires newer Jenkins than the pinned controller image | values.yaml uses `tag: lts-jdk17` (rolling) — `helm upgrade` pulls latest |
+| Pod stuck `Pending` | No default StorageClass | run Step 2 (local-path-provisioner) |
+| Ingress works but `certificate jenkins-tls` stays Pending | DNS doesn't resolve `jenkins.<your>.duckdns.org` | `nslookup jenkins.asterzheku.duckdns.org` — should return the LB IP |
+| `helm install` 504 timeout | Controller image download slow on first run | bump `--timeout 20m`; usually completes second time |
+| `agent { label 'build' }` waits forever | `kubernetes` cloud not configured | `kubectl -n jenkins get cm jenkins-jenkins-jcasc-config -o yaml` — check JCasC config |
+| Kaniko fails with "401 unauthorized" | `dockerhub-creds` missing or wrong ID | recreate the credential with ID `dockerhub-creds` exactly |
 
 ## Why ephemeral agents matter
 
