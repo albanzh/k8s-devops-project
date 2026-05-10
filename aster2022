@@ -1,0 +1,26 @@
+[1mdiff --git a/kubernetes/bookstore-api/README.md b/kubernetes/bookstore-api/README.md[m
+[1mindex c5c9f86..8191580 100644[m
+[1m--- a/kubernetes/bookstore-api/README.md[m
+[1m+++ b/kubernetes/bookstore-api/README.md[m
+[36m@@ -103,8 +103,21 @@[m [mImage size should be ~120 MB.[m
+ 3. **Project pushed to GitHub** — Jenkins clones from there[m
+ 4. **`helm/bookstore/values.yaml` line 9 + `Jenkinsfile` line 20** set to YOUR Docker Hub username[m
+ [m
+[32m+[m[32m********************[m
+[32m+[m[32mPush the project to GitHub (so Jenkins can clone it)[m
+[32m+[m[32mYou may have already done this, but confirm it has the LATEST code (with new IPs):[m
+[32m+[m
+[32m+[m
+[32m+[m[32mcd /mnt/c/Users/user/Desktop/kube/k8s-devops-project[m
+[32m+[m[32mgit status[m
+[32m+[m[32mgit add .[m
+[32m+[m[32mgit commit -m "Phase 5 verified — agent-test SUCCESS"[m
+[32m+[m[32mgit push[m
+[32m+[m
+[32m+[m
+ ### Set your Docker Hub username (one-time)[m
+ [m
+[32m+[m
+ ```bash[m
+ DOCKER_USER="aster2022"   # ← your Docker Hub username[m
+ sed -i "s|YOUR_DOCKERHUB_USER|$DOCKER_USER|g" helm/bookstore/values.yaml Jenkinsfile[m

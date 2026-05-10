@@ -103,7 +103,20 @@ Image size should be ~120 MB.
 3. **Project pushed to GitHub** — Jenkins clones from there
 4. **`helm/bookstore/values.yaml` line 9 + `Jenkinsfile` line 20** set to YOUR Docker Hub username
 
+********************
+Push the project to GitHub (so Jenkins can clone it)
+You may have already done this, but confirm it has the LATEST code (with new IPs):
+
+
+cd /mnt/c/Users/user/Desktop/kube/k8s-devops-project
+git status
+git add .
+git commit -m "Phase 5 verified — agent-test SUCCESS"
+git push
+
+
 ### Set your Docker Hub username (one-time)
+
 
 ```bash
 DOCKER_USER="aster2022"   # ← your Docker Hub username
