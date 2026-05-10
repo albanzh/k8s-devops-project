@@ -34,8 +34,12 @@ pipeline {
   }
 
   environment {
+    IMAGE_REPO   = "${params.IMAGE_REPO}"
     IMAGE_TAG    = "${env.BUILD_NUMBER}"
-    IMAGE_FULL   = "${params.IMAGE_REPO}:${env.IMAGE_TAG}"
+    IMAGE_FULL   = "${params.IMAGE_REPO}:${env.BUILD_NUMBER}"
+    NAMESPACE    = "${params.NAMESPACE}"
+    CLUSTER_ISSUER = "${params.CLUSTER_ISSUER}"
+    FAIL_ON_HIGH_CVE = "${params.FAIL_ON_HIGH_CVE}"
     DOCKER_CREDS = 'dockerhub-creds'   // exact ID of the Jenkins credential
   }
 
