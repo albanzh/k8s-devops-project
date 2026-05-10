@@ -106,18 +106,21 @@ pipeline {
       steps {
         container('trivy') {
           sh '''
-            set -eu
+            set -u
             mkdir -p reports
-            EXIT_FLAG=""
-            if [ "${FAIL_ON_HIGH_CVE}" = "true" ]; then
-              EXIT_FLAG="--exit-code 1"
-            fi
+            # Always run scan (no --exit-code) so we get the report file no matter what
             trivy image --format table --output reports/trivy.txt \\
               --severity HIGH,CRITICAL --ignore-unfixed \\
-              ${EXIT_FLAG} \\
               "${IMAGE_FULL}"
             echo "----- Trivy report -----"
             cat reports/trivy.txt
+            # Now decide whether to fail the build, AFTER printing the report
+            if [ "${FAIL_ON_HIGH_CVE}" = "true" ]; then
+              if grep -E "Total: [1-9]" reports/trivy.txt >/dev/null 2>&1; then
+                echo "FAIL_ON_HIGH_CVE=true and HIGH/CRITICAL CVEs found — failing build"
+                exit 1
+              fi
+            fi
           '''
         }
       }
